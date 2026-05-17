@@ -1,38 +1,93 @@
+// --- PeerJS Setup ---
 const peer = new Peer();
-let conn;
-let html5QrcodeScanner;
+let conn = null;
 let receivedFilesData = []; 
 let incomingFileInfo = {}; 
 let fileChunks = {};
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+let html5QrcodeScanner = null;
 
-// Initialize Peer
+// Generate Peer ID & QR Code
 peer.on('open', (id) => {
     document.getElementById('my-id').innerText = id;
-    new QRCode(document.getElementById("my-qr"), { text: id, width: 128, height: 128 });
+    
+    // Clear old QR if any and make new
+    document.getElementById("my-qr").innerHTML = "";
+    new QRCode(document.getElementById("my-qr"), { 
+        text: id, 
+        width: 160, 
+        height: 160,
+        correctLevel: QRCode.CorrectLevel.H
+    });
 });
 
-// Handle incoming connections
+// Auto-copy ID on click
+document.getElementById('my-id').style.cursor = 'pointer';
+document.getElementById('my-id').onclick = function() {
+    navigator.clipboard.writeText(this.innerText).then(() => {
+        alert("ID Copy ho gayi! Apne friend ko send karo.");
+    }).catch(err => {
+        console.error("Copy nahi ho paya: ", err);
+    });
+};
+
+// Handle Incoming Connection
 peer.on('connection', (connection) => {
     conn = connection;
     setupConnection();
 });
 
-// QR Scanner Logic
+// --- QR Code Scanner Engine ---
 document.getElementById('start-scan-btn').onclick = () => {
-    document.getElementById('reader').style.display = 'block';
-    html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
-    html5QrcodeScanner.render(onScanSuccess);
+    const readerDiv = document.getElementById('reader');
+    readerDiv.style.display = 'block';
+
+    if (!html5QrcodeScanner) {
+        html5QrcodeScanner = new Html5QrcodeScanner("reader", { 
+            fps: 10, 
+            qrbox: { width: 250, height: 250 },
+            rememberLastUsedCamera: true
+        }, false);
+    }
+    
+    html5QrcodeScanner.render(onScanSuccess, onScanFailure);
 };
 
 function onScanSuccess(decodedText) {
-    html5QrcodeScanner.clear();
-    document.getElementById('reader').style.display = 'none';
-    conn = peer.connect(decodedText);
-    conn.on('open', setupConnection);
+    if (html5QrcodeScanner) {
+        html5QrcodeScanner.clear().then(() => {
+            document.getElementById('reader').style.display = 'none';
+        }).catch(err => console.error(err));
+    }
+    connectToPeer(decodedText);
 }
 
-// Connection Setup & Data Handling
+function onScanFailure(error) {
+    // Silent failure to avoid console flooding on every frame
+    console.warn(`QR Scan error: ${error}`);
+}
+
+// --- Connection Logic ---
+function connectToPeer(remoteId) {
+    if (!remoteId) return;
+    document.getElementById('connection-status').innerText = 'Status: Connecting...';
+    conn = peer.connect(remoteId.trim());
+    conn.on('open', setupConnection);
+    conn.on('error', (err) => {
+        alert("Connection fail ho gaya: " + err.message);
+        document.getElementById('connection-status').innerText = 'Status: Disconnected';
+    });
+}
+
+// Support manual connect input if added in HTML
+const manualConnectBtn = document.getElementById('connect-btn');
+if (manualConnectBtn) {
+    manualConnectBtn.onclick = () => {
+        const remoteId = document.getElementById('peer-id-input').value;
+        connectToPeer(remoteId);
+    };
+}
+
 function setupConnection() {
     document.getElementById('connection-status').innerText = 'Status: Connected!';
     document.getElementById('chat-section').style.display = 'block';
@@ -44,24 +99,39 @@ function setupConnection() {
         } else if (data.type === 'file-meta') {
             incomingFileInfo[data.fileId] = data;
             fileChunks[data.fileId] = [];
-            updateProgress(`Receiving ${data.name}...`);
+            updateProgress(`Receiving: ${data.name}...`);
         } else if (data.type === 'file-chunk') {
-            fileChunks[data.fileId].push(data.chunk);
+            if (fileChunks[data.fileId]) {
+                fileChunks[data.fileId].push(data.chunk);
+            }
         } else if (data.type === 'file-done') {
             assembleFile(data.fileId);
         }
     });
+
+    conn.on('close', () => {
+        document.getElementById('connection-status').innerText = 'Status: Peer disconnected';
+    });
 }
 
-// Chatting
+// --- Chat Handling ---
 document.getElementById('send-msg-btn').onclick = () => {
-    const text = document.getElementById('msg-input').value;
+    sendTextMessage();
+};
+
+document.getElementById('msg-input').onkeypress = (e) => {
+    if (e.key === 'Enter') sendTextMessage();
+};
+
+function sendTextMessage() {
+    const input = document.getElementById('msg-input');
+    const text = input.value.trim();
     if (text && conn) {
         conn.send({ type: 'chat', text });
         appendMsg(text, 'self');
-        document.getElementById('msg-input').value = '';
+        input.value = '';
     }
-};
+}
 
 function appendMsg(text, sender) {
     const box = document.getElementById('chat-box');
@@ -72,12 +142,16 @@ function appendMsg(text, sender) {
     box.scrollTop = box.scrollHeight;
 }
 
-// File Chunking & Sending
+// --- File Handling (Chunking) ---
 document.getElementById('send-file-btn').onclick = async () => {
-    const files = document.getElementById('file-input').files;
+    const fileInput = document.getElementById('file-input');
+    const files = fileInput.files;
+    if (files.length === 0 || !conn) return;
+
     for (let file of files) {
         await sendFileInChunks(file);
     }
+    fileInput.value = ''; // Clear selection after sending
 };
 
 async function sendFileInChunks(file) {
@@ -90,40 +164,53 @@ async function sendFileInChunks(file) {
         const buffer = await chunk.arrayBuffer();
         conn.send({ type: 'file-chunk', fileId, chunk: buffer });
         offset += CHUNK_SIZE;
-        updateProgress(`Sending ${file.name}: ${Math.min(100, Math.round(offset/file.size*100))}%`);
+        
+        const percentage = Math.min(100, Math.round((offset / file.size) * 100));
+        updateProgress(`Sending ${file.name}: ${percentage}%`);
     }
     conn.send({ type: 'file-done', fileId });
-    updateProgress(`${file.name} Sent!`);
+    updateProgress(`${file.name} Sent Successfully!`);
 }
 
-// File Receiving & Assembling
 function assembleFile(fileId) {
     const meta = incomingFileInfo[fileId];
+    if (!meta || !fileChunks[fileId]) return;
+
     const blob = new Blob(fileChunks[fileId], { type: meta.fileType });
     receivedFilesData.push({ name: meta.name, blob });
     
     const url = URL.createObjectURL(blob);
     const li = document.createElement('li');
-    li.innerHTML = `<a href="${url}" download="${meta.name}">${meta.name}</a>`;
+    li.innerHTML = `<a href="${url}" download="${meta.name}">⬇️ ${meta.name}</a>`;
     document.getElementById('received-list').appendChild(li);
     
-    updateProgress(`${meta.name} received completely!`);
+    updateProgress(`Received: ${meta.name}`);
     delete fileChunks[fileId];
+    delete incomingFileInfo[fileId];
 }
 
 function updateProgress(text) {
     document.getElementById('progress-area').innerHTML = `<p>${text}</p>`;
 }
 
-// Download All functionality (JSZip)
+// --- Download All (ZIP) ---
 document.getElementById('download-all-btn').onclick = async () => {
-    if(receivedFilesData.length === 0) return;
+    if (receivedFilesData.length === 0) {
+        alert("Download karne ke liye koi file nahi hai!");
+        return;
+    }
+    
     const zip = new JSZip();
-    receivedFilesData.forEach(file => zip.file(file.name, file.blob));
+    receivedFilesData.forEach(file => {
+        zip.file(file.name, file.blob);
+    });
+    
+    updateProgress("Creating ZIP file...");
     const content = await zip.generateAsync({ type: "blob" });
     
     const a = document.createElement('a');
     a.href = URL.createObjectURL(content);
-    a.download = "P2P_Files.zip";
+    a.download = `P2P_Share_${Date.now()}.zip`;
     a.click();
+    updateProgress("ZIP Downloaded!");
 };
