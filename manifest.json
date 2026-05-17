@@ -1,0 +1,16 @@
+{
+  "name": "P2P Chat App",
+  "short_name": "P2P App",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#6200ea",
+  "icons": [
+    {
+      "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d0/QR_code_for_mobile_English_Wikipedia.svg/1200px-QR_code_for_mobile_English_Wikipedia.svg.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
+
